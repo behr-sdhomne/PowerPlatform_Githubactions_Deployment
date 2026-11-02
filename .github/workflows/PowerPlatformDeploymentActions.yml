@@ -1,2 +1,145 @@
+name: Power Platform release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: power-platform-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
 jobs:
-  
+  export:
+    name: Export Dev and check solution
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 180
+    environment: Dev
+    outputs:
+      artifact-id: ${{ steps.release.outputs.artifact-id }}
+      managed-sha256: ${{ steps.hash.outputs.sha256 }}
+    env:
+      PP_ENVIRONMENT_URL: ${{ vars.PP_ENVIRONMENT_URL }}
+      PP_APP_ID: ${{ vars.PP_APP_ID }}
+      PP_TENANT_ID: ${{ vars.PP_TENANT_ID }}
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Validate Dev configuration
+        run: .\.github\scripts\Test-Configuration.ps1 -ExpectedUrl 'https://orgfd9b912f.crm.dynamics.com'
+      - name: Require production protection before exporting
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .\.github\scripts\Test-ProductionGate.ps1
+      - name: Authenticate to Dev
+        uses: microsoft/powerplatform-actions/who-am-i@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
+        with:
+          environment-url: ${{ env.PP_ENVIRONMENT_URL }}
+          app-id: ${{ env.PP_APP_ID }}
+          tenant-id: ${{ env.PP_TENANT_ID }}
+          client-secret: ${{ env.PP_CLIENT_SECRET }}
+      - name: Create output directory
+        run: New-Item -ItemType Directory -Path release | Out-Null
+      - name: Export unmanaged recovery and source package
+        uses: microsoft/powerplatform-actions/export-solution@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
+        with:
+          environment-url: ${{ env.PP_ENVIRONMENT_URL }}
+          app-id: ${{ env.PP_APP_ID }}
+          tenant-id: ${{ env.PP_TENANT_ID }}
+          client-secret: ${{ env.PP_CLIENT_SECRET }}
+          solution-name: BCURequestsWorkflow
+          solution-output-file: release/BCURequestsWorkflow_unmanaged.zip
+          managed: false
+          run-asynchronously: true
+          max-async-wait-time: 30
+      - name: Export managed release once
+        uses: microsoft/powerplatform-actions/export-solution@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
+        with:
+          environment-url: ${{ env.PP_ENVIRONMENT_URL }}
+          app-id: ${{ env.PP_APP_ID }}
+          tenant-id: ${{ env.PP_TENANT_ID }}
+          client-secret: ${{ env.PP_CLIENT_SECRET }}
+          solution-name: BCURequestsWorkflow
+          solution-output-file: release/BCURequestsWorkflow_managed.zip
+          managed: true
+          run-asynchronously: true
+          max-async-wait-time: 30
+      - name: Verify package identity and export versions
+        id: package
+        run: |
+          $version = .\.github\scripts\Test-SolutionPackages.ps1 `
+            -Managed release\BCURequestsWorkflow_managed.zip `
+            -Unmanaged release\BCURequestsWorkflow_unmanaged.zip
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Check solution (zero high-severity issues)
+        uses: microsoft/powerplatform-actions/check-solution@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
+        with:
+          environment-url: ${{ env.PP_ENVIRONMENT_URL }}
+          app-id: ${{ env.PP_APP_ID }}
+          tenant-id: ${{ env.PP_TENANT_ID }}
+          client-secret: ${{ env.PP_CLIENT_SECRET }}
+          path: release/BCURequestsWorkflow_managed.zip
+          fail-on-analysis-error: true
+          checker-logs-artifact-name: solution-checker
+      - name: Record release identity
+        id: hash
+        env:
+          SOLUTION_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          $hash = (Get-FileHash release\BCURequestsWorkflow_managed.zip -Algorithm SHA256).Hash
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          @{
+            solution = 'BCURequestsWorkflow'
+            version = $env:SOLUTION_VERSION
+            managedSha256 = $hash
+            sourceCommit = $env:GITHUB_SHA
+            runId = $env:GITHUB_RUN_ID
+          } | ConvertTo-Json | Set-Content release\manifest.json
+          "## Release`n`nSolution: BCURequestsWorkflow $env:SOLUTION_VERSION`n`nManaged SHA256: $hash`n`nSource commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+      - name: Preserve unmanaged package even if quality check fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dev-unmanaged-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/BCURequestsWorkflow_unmanaged.zip
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Store immutable release
+        id: release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: managed-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            release/BCURequestsWorkflow_managed.zip
+            release/manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  qa:
+    name: Deploy QA
+    needs: export
+    uses: ./.github/workflows/DeployManagedSolution.yml
+    with:
+      target: QA
+      expected-url: https://org94225411.crm.dynamics.com
+      artifact-id: ${{ needs.export.outputs.artifact-id }}
+      managed-sha256: ${{ needs.export.outputs.managed-sha256 }}
+
+  prod:
+    name: Approve and deploy Prod
+    needs: [export, qa]
+    uses: ./.github/workflows/DeployManagedSolution.yml
+    with:
+      target: Prod
+      expected-url: https://org4bd02029.crm.dynamics.com
+      artifact-id: ${{ needs.export.outputs.artifact-id }}
+      managed-sha256: ${{ needs.export.outputs.managed-sha256 }}
