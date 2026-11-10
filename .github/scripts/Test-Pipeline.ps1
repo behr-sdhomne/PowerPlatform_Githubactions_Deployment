@@ -16,12 +16,12 @@ function Assert-Fails([string]$Name, [string]$Message, [scriptblock]$Action) {
     $script:count++
     Write-Output "PASS $Name"
 }
-function New-TestPackage([string]$Path, [string]$Customizations, [string]$Managed = '1', [string]$Version = '1.0.0.16') {
+function New-TestPackage([string]$Path, [string]$Customizations, [string]$Managed = '1', [string]$Version = '1.0.0.16', [string]$SolutionName = 'GithubSolutions_POC') {
     $zip = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
     try {
         $entries = @{
             'customizations.xml' = $Customizations
-            'solution.xml' = "<ImportExportXml><SolutionManifest><UniqueName>BCURequestsWorkflow</UniqueName><Managed>$Managed</Managed><Version>$Version</Version></SolutionManifest></ImportExportXml>"
+            'solution.xml' = "<ImportExportXml><SolutionManifest><UniqueName>$SolutionName</UniqueName><Managed>$Managed</Managed><Version>$Version</Version></SolutionManifest></ImportExportXml>"
         }
         foreach ($name in $entries.Keys) {
             $writer = [IO.StreamWriter]::new($zip.CreateEntry($name).Open())
@@ -40,6 +40,16 @@ try {
         $errors = $null
         [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
         if ($errors.Count) { throw ($errors | Out-String) }
+    }
+    foreach ($valid in @('GithubSolutions_POC', 'BCURequestsWorkflow', 'AnotherSolution123', ('A' * 65))) {
+        Assert-Passes "solution name $valid" {
+            & "$root\Test-SolutionName.ps1" -SolutionName $valid
+        }
+    }
+    foreach ($invalid in @('../Other', '..\Other', 'A/B', 'A\B', ' A', 'A ', "A`n", 'A;whoami', '$(whoami)', 'A"b', 'A:b', 'A*', '1Solution', ('A' * 66), 'CON', 'nul', 'COM1')) {
+        Assert-Fails "unsafe solution name [$invalid]" 'Solution unique name must' {
+            & "$root\Test-SolutionName.ps1" -SolutionName $invalid
+        }
     }
     Assert-Passes 'valid configuration' {
         $env:PP_ENVIRONMENT_URL = 'https://orgfd9b912f.crm.dynamics.com'
@@ -75,54 +85,165 @@ try {
     $unmanaged = Join-Path $temp 'unmanaged.zip'
     $otherVersion = Join-Path $temp 'other-version.zip'
     $settings = Join-Path $temp 'settings.json'
+    $settingsArgs = @{ ExpectedSolutionName = 'GithubSolutions_POC'; ExpectedTarget = 'QA' }
     New-TestPackage $empty '<ImportExportXml />'
     New-TestPackage $unmanaged '<ImportExportXml />' '0'
     New-TestPackage $otherVersion '<ImportExportXml />' '0' '1.0.0.17'
     New-TestPackage $mapped '<ImportExportXml><connectionreferences><connectionreference connectionreferencelogicalname="behr_shared" /></connectionreferences><environmentvariabledefinitions><environmentvariabledefinition schemaname="behr_url" /></environmentvariabledefinitions></ImportExportXml>'
-    '{"EnvironmentVariables":[],"ConnectionReferences":[]}' | Set-Content $settings
+    '{"SolutionName":"GithubSolutions_POC","TargetEnvironment":"QA","EnvironmentVariables":[],"ConnectionReferences":[]}' | Set-Content $settings
+    Assert-Passes 'settings preflight without package' {
+        & "$root\Test-DeploymentSettings.ps1" -Settings $settings @settingsArgs
+    }
+    Assert-Fails 'missing per-solution file' 'does not exist' {
+        & "$root\Test-DeploymentSettings.ps1" -Settings (Join-Path $temp 'missing.json') @settingsArgs
+    }
     Assert-Passes 'empty settings for package without references' {
-        & "$root\Test-DeploymentSettings.ps1" -Solution $empty -Settings $settings
+        & "$root\Test-DeploymentSettings.ps1" -Solution $empty -Settings $settings @settingsArgs
     }
     Assert-Fails 'missing connection mapping' 'Missing explicit target connection' {
-        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
     }
     $config = @{
+        SolutionName = 'GithubSolutions_POC'
+        TargetEnvironment = 'QA'
         EnvironmentVariables = @(@{ SchemaName = 'behr_url'; Value = 'https://qa.example.test' })
         ConnectionReferences = @(@{ LogicalName = 'behr_shared'; ConnectionId = 'synthetic-test-connection'; ConnectorId = 'synthetic-test-connector' })
     }
     $config | ConvertTo-Json -Depth 5 | Set-Content $settings
     Assert-Passes 'complete target settings' {
-        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
     }
+    Assert-Fails 'settings from a different solution' 'does not match the selected release' {
+        & "$root\Test-DeploymentSettings.ps1" -Settings $settings -ExpectedSolutionName BCURequestsWorkflow -ExpectedTarget QA
+    }
+    Assert-Fails 'QA settings copied to Prod' 'does not match the selected release' {
+        & "$root\Test-DeploymentSettings.ps1" -Settings $settings -ExpectedSolutionName GithubSolutions_POC -ExpectedTarget Prod
+    }
+    $output = Join-Path $temp 'import-settings.json'
+    Assert-Passes 'render PAC-only import settings' {
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings -OutputPath $output @settingsArgs
+        $rendered = Get-Content $output -Raw | ConvertFrom-Json
+        if ($rendered.PSObject.Properties.Name.Count -ne 2 -or
+            'SolutionName' -in $rendered.PSObject.Properties.Name -or
+            $rendered.ConnectionReferences[0].LogicalName -ne 'behr_shared') {
+            throw 'Unexpected rendered PAC settings.'
+        }
+    }
+    Assert-Fails 'refuse output without package validation' 'solution package is required' {
+        & "$root\Test-DeploymentSettings.ps1" -Settings $settings -OutputPath $output @settingsArgs
+    }
+    $config.EnvironmentVariables += @{ SchemaName = 'other_solution_variable'; Value = 'qa' }
+    $config | ConvertTo-Json -Depth 5 | Set-Content $settings
+    Assert-Fails 'unrelated environment variable rejected' 'not present in the selected solution' {
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
+    }
+    $config.EnvironmentVariables = @(@{ SchemaName = 'behr_url'; Value = 'qa' })
+    $config.ConnectionReferences += @{ LogicalName = 'other_solution_connection'; ConnectionId = 'synthetic'; ConnectorId = 'synthetic' }
+    $config | ConvertTo-Json -Depth 5 | Set-Content $settings
+    Assert-Fails 'unrelated connection mapping rejected' 'not present in the selected solution' {
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
+    }
+    $config.ConnectionReferences = @($config.ConnectionReferences[0])
     $config.EnvironmentVariables = @()
     $config | ConvertTo-Json -Depth 5 | Set-Content $settings
     Assert-Fails 'missing environment variable' 'Missing explicit target environment variable' {
-        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
     }
     $config.EnvironmentVariables = @(@{ SchemaName = 'behr_url'; Value = 'REPLACE_ME' })
     $config | ConvertTo-Json -Depth 5 | Set-Content $settings
     Assert-Fails 'unresolved settings placeholder' 'Unresolved placeholder' {
-        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
     }
     $config.EnvironmentVariables = @(@{ SchemaName = 'behr_url'; Value = '' })
     $config | ConvertTo-Json -Depth 5 | Set-Content $settings
     Assert-Fails 'blank environment value' 'non-empty Value' {
-        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
     }
     $config.EnvironmentVariables = @(@{ SchemaName = 'behr_url'; Value = 'qa' })
     $config.ConnectionReferences += $config.ConnectionReferences[0]
     $config | ConvertTo-Json -Depth 5 | Set-Content $settings
     Assert-Fails 'duplicate connection' 'Duplicate connection reference' {
-        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings
+        & "$root\Test-DeploymentSettings.ps1" -Solution $mapped -Settings $settings @settingsArgs
     }
     Assert-Passes 'matching package identity' {
-        & "$root\Test-SolutionPackages.ps1" -Managed $empty -Unmanaged $unmanaged
+        & "$root\Test-SolutionPackages.ps1" -Managed $empty -Unmanaged $unmanaged -ExpectedSolutionName GithubSolutions_POC
     }
     Assert-Fails 'wrong managed package type' 'package type is incorrect' {
-        & "$root\Test-SolutionPackages.ps1" -Managed $unmanaged -Unmanaged $empty
+        & "$root\Test-SolutionPackages.ps1" -Managed $unmanaged -Unmanaged $empty -ExpectedSolutionName GithubSolutions_POC
     }
     Assert-Fails 'version changed between exports' 'changed between exports' {
-        & "$root\Test-SolutionPackages.ps1" -Managed $empty -Unmanaged $otherVersion
+        & "$root\Test-SolutionPackages.ps1" -Managed $empty -Unmanaged $otherVersion -ExpectedSolutionName GithubSolutions_POC
+    }
+    Assert-Fails 'package belonging to a different solution' 'package type is incorrect' {
+        & "$root\Test-SolutionPackages.ps1" -Managed $empty -ExpectedSolutionName BCURequestsWorkflow
+    }
+    Assert-Fails 'settings cannot validate wrong solution package' 'package type is incorrect' {
+        & "$root\Test-DeploymentSettings.ps1" -Solution $empty `
+            -Settings (Join-Path $root '..\..\deployment-settings\BCURequestsWorkflow\QA.json') `
+            -ExpectedSolutionName BCURequestsWorkflow -ExpectedTarget QA
+    }
+    $bcuManaged = Join-Path $temp 'bcu-managed.zip'
+    $bcuUnmanaged = Join-Path $temp 'bcu-unmanaged.zip'
+    New-TestPackage $bcuManaged '<ImportExportXml />' -SolutionName BCURequestsWorkflow
+    New-TestPackage $bcuUnmanaged '<ImportExportXml />' '0' -SolutionName BCURequestsWorkflow
+    Assert-Passes 'BCU package identity remains supported' {
+        & "$root\Test-SolutionPackages.ps1" -Managed $bcuManaged -Unmanaged $bcuUnmanaged -ExpectedSolutionName BCURequestsWorkflow
+    }
+    foreach ($target in @('QA', 'Prod')) {
+        Assert-Passes "migrated BCU settings $target" {
+            & "$root\Test-DeploymentSettings.ps1" -Solution $bcuManaged `
+                -Settings (Join-Path $root "..\..\deployment-settings\BCURequestsWorkflow\$target.json") `
+                -ExpectedSolutionName BCURequestsWorkflow -ExpectedTarget $target
+        }
+    }
+    $poc = Join-Path $temp 'poc.zip'
+    $variablesXml = (1..4 | ForEach-Object { "<environmentvariabledefinition schemaname=`"synthetic_poc_$_`" />" }) -join ''
+    New-TestPackage $poc "<ImportExportXml><connectionreferences><connectionreference connectionreferencelogicalname=`"behr_shared`" /></connectionreferences><environmentvariabledefinitions>$variablesXml</environmentvariabledefinitions></ImportExportXml>"
+    $config.ConnectionReferences = @($config.ConnectionReferences[0])
+    $config.EnvironmentVariables = @(1..4 | ForEach-Object { @{ SchemaName = "synthetic_poc_$_"; Value = "synthetic-target-value-$_" } })
+    $config | ConvertTo-Json -Depth 5 | Set-Content $settings
+    Assert-Passes 'POC-shaped synthetic inventory: one reference and four variables' {
+        & "$root\Test-DeploymentSettings.ps1" -Solution $poc -Settings $settings @settingsArgs
+    }
+    $config.EnvironmentVariables = @($config.EnvironmentVariables | Select-Object -First 3)
+    $config | ConvertTo-Json -Depth 5 | Set-Content $settings
+    Assert-Fails 'POC-shaped inventory missing fourth variable' 'Missing explicit target environment variable' {
+        & "$root\Test-DeploymentSettings.ps1" -Solution $poc -Settings $settings @settingsArgs
+    }
+
+    $release = Join-Path $temp 'release'
+    New-Item -ItemType Directory -Path $release | Out-Null
+    Copy-Item $empty (Join-Path $release 'managed.zip')
+    $digest = (Get-FileHash $empty -Algorithm SHA256).Hash
+    $releaseArgs = @{
+        ReleaseDirectory = $release
+        ExpectedSolutionName = 'GithubSolutions_POC'
+        ExpectedSha256 = $digest
+        ExpectedSourceCommit = ('a' * 40)
+    }
+    $manifest = @{ solution = 'GithubSolutions_POC'; version = '1.0.0.16'; managedSha256 = $digest; sourceCommit = ('a' * 40) }
+    $manifestPath = Join-Path $release 'manifest.json'
+    $manifest | ConvertTo-Json | Set-Content $manifestPath
+    Assert-Passes 'release digest and provenance match selected solution' {
+        & "$root\Test-ReleaseArtifact.ps1" @releaseArgs
+    }
+    $releaseArgs.ExpectedSha256 = 'invalid'
+    Assert-Fails 'malformed release digest' 'digest does not match' { & "$root\Test-ReleaseArtifact.ps1" @releaseArgs }
+    $releaseArgs.ExpectedSha256 = ('0' * 64)
+    Assert-Fails 'different release digest' 'digest does not match' { & "$root\Test-ReleaseArtifact.ps1" @releaseArgs }
+    $releaseArgs.ExpectedSha256 = $digest
+    foreach ($field in @('solution', 'sourceCommit', 'version', 'managedSha256')) {
+        $previous = $manifest[$field]
+        $manifest[$field] = 'different'
+        $manifest | ConvertTo-Json | Set-Content $manifestPath
+        Assert-Fails "wrong manifest $field" 'Release manifest does not match' { & "$root\Test-ReleaseArtifact.ps1" @releaseArgs }
+        $manifest[$field] = $previous
+    }
+    $manifest | ConvertTo-Json | Set-Content $manifestPath
+    Copy-Item $bcuManaged (Join-Path $release 'managed.zip') -Force
+    $releaseArgs.ExpectedSha256 = (Get-FileHash $bcuManaged -Algorithm SHA256).Hash
+    Assert-Fails 'wrong-solution artifact rejected even with matching digest' 'package type is incorrect' {
+        & "$root\Test-ReleaseArtifact.ps1" @releaseArgs
     }
 
     function Invoke-RestMethod {

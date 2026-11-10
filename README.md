@@ -1,7 +1,7 @@
 # Power Platform ALM: Dev -> QA -> Prod
 
 Manually run **Power Platform release** on `main`. It authenticates to Dev,
-exports `BCURequestsWorkflow` as unmanaged and managed packages, runs Solution
+exports the required **`solution-name`** input as unmanaged and managed packages, runs Solution
 Checker, imports the managed package into QA, then waits for GitHub's protected
 Prod environment approval. Prod imports the **same artifact ID and SHA-256**;
 QA is not used as a disposable build environment. No push/release trigger exists.
@@ -9,9 +9,22 @@ Non-main dispatches skip deployment. One release runs at a time; a new release
 does not cancel an in-progress deployment. GitHub concurrency retains only one
 pending run, so it is not a FIFO release queue.
 
-Solution: **BCU Requests Workflow**, unique name `BCURequestsWorkflow`, publisher
-**Behr Publisher** (`behrpublisher`). Observed starting version: `1.0.0.16`.
-Increment the solution version in Dev before each release. Save and publish the
+Use the **unique name**, not the display name: for example `GithubSolutions_POC`
+or `BCURequestsWorkflow`. The same workflow supports any eligible unmanaged
+solution in the configured Dev environment, provided its dependencies, deployment
+permissions and per-solution target configurations are ready. It is not a
+cross-tenant or arbitrary-environment deployment tool. Managed-only, system or
+non-exportable solutions are not made eligible by entering their name; Dataverse
+export/authentication errors fail the run.
+
+Names must start with an ASCII letter and contain only ASCII letters, digits and
+underscores (1-65 characters); reserved Windows device names are rejected.
+Validation occurs before a name is used in a filesystem path or export action.
+User input is passed through environment variables, never interpolated into
+PowerShell source. All solutions share the release concurrency lock because
+imports into the same QA/Prod environments must not overlap.
+
+Increment the selected solution's version in Dev before each release. Save and publish the
 intended Dev changes before dispatch; avoid editing Dev during the two exports.
 The unmanaged export is a recovery/source package, not an automatic source commit
 or a production backup.
@@ -21,8 +34,9 @@ or a production backup.
 Initial remote setup is complete: `Dev`, `QA` and `Prod` exist, each has its
 `PP_ENVIRONMENT_URL` and a main-branch-only deployment policy. Prod requires
 `behr-sdhomne`, disallows administrator bypass, and permits self-review.
-`PP_APP_ID`, `PP_TENANT_ID` and `PP_CLIENT_SECRET` remain deliberately unset
-until the Entra registration is ready.
+The generic workflow uses the same existing environment credentials and URLs;
+changing the selected solution does not change or recreate them. Complete
+`PP_APP_ID`, `PP_TENANT_ID` and `PP_CLIENT_SECRET` if not already configured.
 
 Use exactly `Dev`, `QA`, and `Prod` in **Settings > Environments**. Set these
 **environment variables**:
@@ -63,7 +77,7 @@ policy. The workflow token requests only `contents: read` and `actions: read`.
 All third-party actions are pinned to verified full commit SHAs. Review and
 update these pins periodically, including the Microsoft Checker behavior.
 
-## Credentials when the Entra registration is ready
+## Credentials and application user access
 
 Use the supported service-principal client-secret authentication inputs for the
 Microsoft Power Platform actions. Prefer separate app registrations/secrets per
@@ -95,27 +109,55 @@ federation support and does not request `id-token: write`.
 
 ## Target-specific deployment settings
 
-`deployment-settings\QA.json` and `deployment-settings\Prod.json` are deliberate
-empty templates, not invented connection IDs. They work only for solutions with
-no connection references or environment variables. Before the first release,
-generate an inventory from a managed export using the Power Platform CLI:
+Every selected solution needs **both**
+`deployment-settings\<unique-name>\QA.json` and
+`deployment-settings\<unique-name>\Prod.json`, even if it has no connection
+references or environment variables. There is no shared/default configuration
+fallback. Both files are checked before authentication/export, then checked against
+the managed package before QA is changed, and again before each target import.
+Names and case in the input, package manifest and configuration must match exactly.
+
+**BCU migration:** the original root-level `QA.json` and `Prod.json` templates
+have moved unchanged in their mapping arrays to
+`deployment-settings\BCURequestsWorkflow\`. Each now includes `SolutionName` and
+`TargetEnvironment` identity fields. Run the workflow with
+`solution-name: BCURequestsWorkflow` to select this configuration. If you have
+filled copies of the old files elsewhere, move those values into the corresponding
+solution folder and add the two identity fields rather than discarding them.
+There is deliberately no legacy-path fallback.
+
+For a new solution, generate its actual inventory from a managed export:
 
 ```powershell
-pac solution create-settings --solution-zip .\BCURequestsWorkflow_managed.zip --settings-file .\settings.generated.json
+pac solution create-settings --solution-zip .\GithubSolutions_POC_managed.zip --settings-file .\settings.generated.json
 ```
 
-Use the inventory to populate each target's checked-in JSON. Each connection
+Create a folder named `GithubSolutions_POC` under `deployment-settings`, then
+create `QA.json` and `Prod.json` from that inventory. Add
+`"SolutionName": "GithubSolutions_POC"` and `"TargetEnvironment": "QA"` or
+`"Prod"` respectively alongside the two arrays generated by PAC. Each connection
 entry requires `LogicalName`, `ConnectionId`, and `ConnectorId`; each variable
 entry requires `SchemaName` and `Value`. Obtain actual IDs from the target
 environment. Create/authorize connections there first. Review any existing
 environment variable current values in the source solution to avoid shipping
 Dev-specific configuration.
 
+For `GithubSolutions_POC`, the reported inventory is **one Excel Online (Business)
+connection reference and four environment variables**. Their actual logical/schema
+names, connector ID, authorized QA/Prod connection IDs, and target values still
+need to be obtained. No POC configuration is fabricated here: the workflow will
+refuse to release it until both real configuration files exist and pass validation.
+Do not copy the empty BCU mappings as if they were valid POC settings.
+
 The pre-import guard reads the solution's `customizations.xml` and requires an
 explicit non-empty target value for every packaged environment variable and an
 explicit mapping for every connection reference. It rejects unresolved
 placeholders, duplicate names, and missing mappings rather than silently accepting
-Dev defaults. Intentionally blank variables need a reviewed validator change.
+Dev defaults. It also rejects mappings not present in the selected solution and
+configurations bound to a different solution or target. The runtime import file
+contains only PAC's `EnvironmentVariables` and `ConnectionReferences` arrays;
+the identity fields are validation metadata and are not passed to PAC.
+Intentionally blank variables need a reviewed validator change.
 Do not commit passwords, tokens or other secret configuration to these files:
 use platform-supported secret stores (for example Key Vault-backed variables).
 This repository is public; review connection metadata and exported solution
@@ -128,7 +170,8 @@ contents for sensitive information before uploading or committing them.
    below before merging the workflow into `main`.
 2. Save/publish and increment the Dev solution version. Confirm no release is
    already waiting for approval. In **Actions > Power Platform release**, choose
-   **Run workflow**, branch `main`.
+   **Run workflow**, branch `main`, and enter the required solution unique name
+   (for example `GithubSolutions_POC`).
 3. Review Solution Checker results and QA import. The pinned official
    `check-solution` implementation uses `HighIssueCount` with threshold `0`, and
    analysis errors fail the run. Review lower-severity findings too; a clean
@@ -141,7 +184,12 @@ contents for sensitive information before uploading or committing them.
    Confirm production behavior after the import; an import success is not a
    smoke-test pass.
 
-The `managed-release-*` artifact contains the managed ZIP and provenance manifest.
+The `managed-release-<solution>-<run>-<attempt>` artifact contains `managed.zip`
+and a provenance manifest recording the selected solution, version, commit and
+digest. Generic ZIP filenames are isolated inside jobs and immutable artifacts;
+the unique artifact ID is promoted to both targets, not a filename/name search.
+Each target also checks the actual package solution identity and manifest, so an
+artifact for another solution is rejected even if its hash is supplied.
 The `dev-unmanaged-*` artifact preserves the unmanaged ZIP even if Checker fails
 after export. Artifacts expire after 30 days: download to an approved retained
 release store if longer retention or disaster recovery requires it. Artifact
@@ -167,12 +215,13 @@ Run `actionlint` from the repository root and run
 Validate settings against an actual exported package using:
 
 ```powershell
-.\.github\scripts\Test-DeploymentSettings.ps1 -Solution .\BCURequestsWorkflow_managed.zip -Settings .\deployment-settings\QA.json
-.\.github\scripts\Test-DeploymentSettings.ps1 -Solution .\BCURequestsWorkflow_managed.zip -Settings .\deployment-settings\Prod.json
+.\.github\scripts\Test-DeploymentSettings.ps1 -Solution .\GithubSolutions_POC_managed.zip -Settings .\deployment-settings\GithubSolutions_POC\QA.json -ExpectedSolutionName GithubSolutions_POC -ExpectedTarget QA
+.\.github\scripts\Test-DeploymentSettings.ps1 -Solution .\GithubSolutions_POC_managed.zip -Settings .\deployment-settings\GithubSolutions_POC\Prod.json -ExpectedSolutionName GithubSolutions_POC -ExpectedTarget Prod
 ```
 
-Registration and connection inventory are still pending. No fake credential
-secrets are supplied, and no deployment is performed as part of this setup.
+Complete any pending credentials and the actual per-solution connection inventory
+before a release. No fake credential secrets are supplied, and no deployment is
+performed as part of this setup.
 
 References:
 [Microsoft deployment tutorial](https://learn.microsoft.com/en-us/power-platform/alm/tutorials/github-actions-deploy),

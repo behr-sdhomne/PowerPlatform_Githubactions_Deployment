@@ -1,7 +1,13 @@
 name: Power Platform release
+run-name: Release ${{ inputs.solution-name }} to QA and Prod
 
 on:
   workflow_dispatch:
+    inputs:
+      solution-name:
+        description: Unmanaged solution unique name in Dev (not the display name)
+        type: string
+        required: true
 
 permissions:
   contents: read
@@ -30,10 +36,20 @@ jobs:
       PP_APP_ID: ${{ vars.PP_APP_ID }}
       PP_TENANT_ID: ${{ vars.PP_TENANT_ID }}
       PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+      SOLUTION_NAME: ${{ inputs.solution-name }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Validate selection and both target configurations
+        id: selection
+        run: |
+          .\.github\scripts\Test-SolutionName.ps1 -SolutionName $env:SOLUTION_NAME
+          foreach ($target in @('QA', 'Prod')) {
+            .\.github\scripts\Test-DeploymentSettings.ps1 `
+              -Settings "deployment-settings\$env:SOLUTION_NAME\$target.json" `
+              -ExpectedSolutionName $env:SOLUTION_NAME -ExpectedTarget $target
+          }
       - name: Validate Dev configuration
         run: .\.github\scripts\Test-Configuration.ps1 -ExpectedUrl 'https://orgfd9b912f.crm.dynamics.com'
       - name: Require production protection before exporting
@@ -56,8 +72,8 @@ jobs:
           app-id: ${{ env.PP_APP_ID }}
           tenant-id: ${{ env.PP_TENANT_ID }}
           client-secret: ${{ env.PP_CLIENT_SECRET }}
-          solution-name: BCURequestsWorkflow
-          solution-output-file: release/BCURequestsWorkflow_unmanaged.zip
+          solution-name: ${{ inputs.solution-name }}
+          solution-output-file: release/unmanaged.zip
           managed: false
           run-asynchronously: true
           max-async-wait-time: 30
@@ -68,8 +84,8 @@ jobs:
           app-id: ${{ env.PP_APP_ID }}
           tenant-id: ${{ env.PP_TENANT_ID }}
           client-secret: ${{ env.PP_CLIENT_SECRET }}
-          solution-name: BCURequestsWorkflow
-          solution-output-file: release/BCURequestsWorkflow_managed.zip
+          solution-name: ${{ inputs.solution-name }}
+          solution-output-file: release/managed.zip
           managed: true
           run-asynchronously: true
           max-async-wait-time: 30
@@ -77,9 +93,17 @@ jobs:
         id: package
         run: |
           $version = .\.github\scripts\Test-SolutionPackages.ps1 `
-            -Managed release\BCURequestsWorkflow_managed.zip `
-            -Unmanaged release\BCURequestsWorkflow_unmanaged.zip
+            -Managed release\managed.zip -Unmanaged release\unmanaged.zip `
+            -ExpectedSolutionName $env:SOLUTION_NAME
           "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Validate both target inventories against selected package
+        run: |
+          foreach ($target in @('QA', 'Prod')) {
+            .\.github\scripts\Test-DeploymentSettings.ps1 `
+              -Solution release\managed.zip `
+              -Settings "deployment-settings\$env:SOLUTION_NAME\$target.json" `
+              -ExpectedSolutionName $env:SOLUTION_NAME -ExpectedTarget $target
+          }
       - name: Check solution (zero high-severity issues)
         uses: microsoft/powerplatform-actions/check-solution@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
         with:
@@ -87,7 +111,7 @@ jobs:
           app-id: ${{ env.PP_APP_ID }}
           tenant-id: ${{ env.PP_TENANT_ID }}
           client-secret: ${{ env.PP_CLIENT_SECRET }}
-          path: release/BCURequestsWorkflow_managed.zip
+          path: release/managed.zip
           fail-on-analysis-error: true
           checker-logs-artifact-name: solution-checker
       - name: Record release identity
@@ -95,31 +119,31 @@ jobs:
         env:
           SOLUTION_VERSION: ${{ steps.package.outputs.version }}
         run: |
-          $hash = (Get-FileHash release\BCURequestsWorkflow_managed.zip -Algorithm SHA256).Hash
+          $hash = (Get-FileHash release\managed.zip -Algorithm SHA256).Hash
           "sha256=$hash" >> $env:GITHUB_OUTPUT
           @{
-            solution = 'BCURequestsWorkflow'
+            solution = $env:SOLUTION_NAME
             version = $env:SOLUTION_VERSION
             managedSha256 = $hash
             sourceCommit = $env:GITHUB_SHA
             runId = $env:GITHUB_RUN_ID
           } | ConvertTo-Json | Set-Content release\manifest.json
-          "## Release`n`nSolution: BCURequestsWorkflow $env:SOLUTION_VERSION`n`nManaged SHA256: $hash`n`nSource commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
+          "## Release`n`nSolution: $env:SOLUTION_NAME $env:SOLUTION_VERSION`n`nManaged SHA256: $hash`n`nSource commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
       - name: Preserve unmanaged package even if quality check fails
-        if: always()
+        if: always() && steps.selection.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: dev-unmanaged-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release/BCURequestsWorkflow_unmanaged.zip
+          name: dev-unmanaged-${{ inputs.solution-name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/unmanaged.zip
           if-no-files-found: warn
           retention-days: 30
       - name: Store immutable release
         id: release
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: managed-release-${{ github.run_id }}-${{ github.run_attempt }}
+          name: managed-release-${{ inputs.solution-name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            release/BCURequestsWorkflow_managed.zip
+            release/managed.zip
             release/manifest.json
           if-no-files-found: error
           retention-days: 30
@@ -129,6 +153,7 @@ jobs:
     needs: export
     uses: ./.github/workflows/DeployManagedSolution.yml
     with:
+      solution-name: ${{ inputs.solution-name }}
       target: QA
       expected-url: https://org94225411.crm.dynamics.com
       artifact-id: ${{ needs.export.outputs.artifact-id }}
@@ -139,6 +164,7 @@ jobs:
     needs: [export, qa]
     uses: ./.github/workflows/DeployManagedSolution.yml
     with:
+      solution-name: ${{ inputs.solution-name }}
       target: Prod
       expected-url: https://org4bd02029.crm.dynamics.com
       artifact-id: ${{ needs.export.outputs.artifact-id }}

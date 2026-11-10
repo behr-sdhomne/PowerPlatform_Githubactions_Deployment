@@ -3,6 +3,9 @@ name: Deploy managed solution
 on:
   workflow_call:
     inputs:
+      solution-name:
+        type: string
+        required: true
       target:
         type: string
         required: true
@@ -39,12 +42,14 @@ jobs:
       EXPECTED_URL: ${{ inputs.expected-url }}
       TARGET: ${{ inputs.target }}
       EXPECTED_SHA256: ${{ inputs.managed-sha256 }}
+      SOLUTION_NAME: ${{ inputs.solution-name }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
       - name: Validate target configuration
         run: |
+          .\.github\scripts\Test-SolutionName.ps1 -SolutionName $env:SOLUTION_NAME
           if ($env:TARGET -notin @('QA', 'Prod')) { throw 'Unsupported deployment target.' }
           .\.github\scripts\Test-Configuration.ps1 -ExpectedUrl $env:EXPECTED_URL
       - name: Recheck production approval protection
@@ -58,13 +63,14 @@ jobs:
           merge-multiple: true
       - name: Verify identical release and complete target settings
         run: |
-          $actual = (Get-FileHash release\BCURequestsWorkflow_managed.zip -Algorithm SHA256).Hash
-          if ($env:EXPECTED_SHA256 -notmatch '^[A-Fa-f0-9]{64}$' -or $actual -ne $env:EXPECTED_SHA256) {
-            throw 'Managed solution digest does not match the checked Dev export.'
-          }
+          .\.github\scripts\Test-ReleaseArtifact.ps1 -ReleaseDirectory release `
+            -ExpectedSolutionName $env:SOLUTION_NAME -ExpectedSha256 $env:EXPECTED_SHA256 `
+            -ExpectedSourceCommit $env:GITHUB_SHA
           .\.github\scripts\Test-DeploymentSettings.ps1 `
-            -Solution release\BCURequestsWorkflow_managed.zip `
-            -Settings "deployment-settings\$env:TARGET.json"
+            -Solution release\managed.zip `
+            -Settings "deployment-settings\$env:SOLUTION_NAME\$env:TARGET.json" `
+            -ExpectedSolutionName $env:SOLUTION_NAME -ExpectedTarget $env:TARGET `
+            -OutputPath release\deployment-settings.json
       - name: Authenticate to target
         uses: microsoft/powerplatform-actions/who-am-i@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
         with:
@@ -79,9 +85,9 @@ jobs:
           app-id: ${{ env.PP_APP_ID }}
           tenant-id: ${{ env.PP_TENANT_ID }}
           client-secret: ${{ env.PP_CLIENT_SECRET }}
-          solution-file: release/BCURequestsWorkflow_managed.zip
+          solution-file: release/managed.zip
           use-deployment-settings-file: true
-          deployment-settings-file: deployment-settings/${{ inputs.target }}.json
+          deployment-settings-file: release/deployment-settings.json
           run-asynchronously: true
           max-async-wait-time: 60
           force-overwrite: false
@@ -89,4 +95,4 @@ jobs:
           publish-changes: true
       - name: Record successful import
         run: |
-          "## $env:TARGET import succeeded`n`nManaged SHA256: $env:EXPECTED_SHA256`n`nVerify app behavior, connections, permissions and flow activation before approving production." >> $env:GITHUB_STEP_SUMMARY
+          "## $env:SOLUTION_NAME - $env:TARGET import succeeded`n`nManaged SHA256: $env:EXPECTED_SHA256`n`nVerify app behavior, connections, permissions and flow activation before approving production." >> $env:GITHUB_STEP_SUMMARY
