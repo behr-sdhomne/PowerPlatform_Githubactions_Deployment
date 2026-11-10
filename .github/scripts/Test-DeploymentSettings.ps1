@@ -39,9 +39,23 @@ if ($Solution) {
         if ($null -eq $entry) { throw 'Solution is missing customizations.xml.' }
         $reader = [System.IO.StreamReader]::new($entry.Open())
         try { [xml]$xml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        $connectionNames = @($xml.SelectNodes('//connectionreference') | ForEach-Object { $_.GetAttribute('connectionreferencelogicalname') })
+        $variableNames = @($xml.SelectNodes('//environmentvariabledefinition') | ForEach-Object { $_.GetAttribute('schemaname') })
+        foreach ($definition in $archive.Entries | Where-Object { $_.FullName -match '\Aenvironmentvariabledefinitions/[^/]+/environmentvariabledefinition\.xml\z' }) {
+            $reader = [System.IO.StreamReader]::new($definition.Open())
+            try { [xml]$definitionXml = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if ($definitionXml.DocumentElement.LocalName -cne 'environmentvariabledefinition') {
+                throw 'Invalid packaged environment variable definition.'
+            }
+            $name = $definitionXml.DocumentElement.GetAttribute('schemaname')
+            $folderName = ($definition.FullName -split '/')[1]
+            if ([string]::IsNullOrWhiteSpace($name) -or $name -cne $folderName) {
+                throw 'Packaged environment variable schema does not match its definition folder.'
+            }
+            $variableNames += $name
+        }
     } finally { $archive.Dispose() }
-    $connectionNames = @($xml.SelectNodes('//connectionreference') | ForEach-Object { $_.GetAttribute('connectionreferencelogicalname') })
-    $variableNames = @($xml.SelectNodes('//environmentvariabledefinition') | ForEach-Object { $_.GetAttribute('schemaname') })
+    $variableNames = @($variableNames | Select-Object -Unique)
 }
 
 $seen = @{}

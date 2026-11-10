@@ -240,7 +240,9 @@ import; Prod validates its configuration after approval but before its import.
 A missing/invalid Prod secret may stop a release after QA has succeeded.
 
 The guard verifies package identity, target identity, array shapes, duplicates,
-placeholders, extra mappings and completeness against `customizations.xml`.
+placeholders, extra mappings and completeness against `customizations.xml` and
+separate `environmentvariabledefinitions/<schema>/environmentvariabledefinition.xml`
+entries. It reads schema metadata only, not packaged current values, for this inventory.
 Wrong-solution or wrong-target configuration is rejected. Blank values require a
 reviewed validator change. No JSON content is interpolated into shell source.
 The loader registers masks for the complete JSON and individual strings and

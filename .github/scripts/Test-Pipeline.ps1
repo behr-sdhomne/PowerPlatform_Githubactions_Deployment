@@ -238,6 +238,42 @@ try {
         }
         if ($env:PP_DEPLOYMENT_SETTINGS_JSON) { throw 'Private JSON remained in the process environment.' }
     }
+    $splitPackage = Join-Path $temp 'split-definitions.zip'
+    New-TestPackage $splitPackage '<ImportExportXml><connectionreferences><connectionreference connectionreferencelogicalname="behr_shared" /></connectionreferences></ImportExportXml>'
+    $zip = [IO.Compression.ZipFile]::Open($splitPackage, [IO.Compression.ZipArchiveMode]::Update)
+    try {
+        foreach ($i in 1..4) {
+            $writer = [IO.StreamWriter]::new($zip.CreateEntry("environmentvariabledefinitions/synthetic_poc_$i/environmentvariabledefinition.xml").Open())
+            try { $writer.Write("<environmentvariabledefinition schemaname=`"synthetic_poc_$i`" />") } finally { $writer.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+    Assert-Passes 'private settings support separate packaged variable definitions' {
+        $env:PP_DEPLOYMENT_SETTINGS_JSON = $privateJson
+        & "$root\New-PrivateDeploymentSettings.ps1" -Solution $splitPackage -ExpectedSolutionName GithubSolutions_POC `
+            -ExpectedTarget QA -OutputPath $privatePath | Out-Null
+        $rendered = Get-Content $privatePath -Raw | ConvertFrom-Json
+        if ($rendered.EnvironmentVariables.Count -ne 4) { throw 'Separate definitions not retained.' }
+    }
+    Assert-Fails 'separate definition requires all four mappings' 'Missing explicit target environment variable' {
+        $candidate = $privateJson | ConvertFrom-Json
+        $candidate.EnvironmentVariables = @($candidate.EnvironmentVariables | Select-Object -First 3)
+        & "$root\Test-DeploymentSettings.ps1" -Configuration $candidate -Solution $splitPackage @settingsArgs
+    }
+    Assert-Fails 'unrelated mapping rejected for separate definitions' 'not present in the selected solution' {
+        $candidate = $privateJson | ConvertFrom-Json
+        $candidate.EnvironmentVariables[0].SchemaName = 'unrelated_schema'
+        & "$root\Test-DeploymentSettings.ps1" -Configuration $candidate -Solution $splitPackage @settingsArgs
+    }
+    $invalidDefinition = Join-Path $temp 'invalid-definition.zip'
+    New-TestPackage $invalidDefinition '<ImportExportXml />'
+    $zip = [IO.Compression.ZipFile]::Open($invalidDefinition, [IO.Compression.ZipArchiveMode]::Update)
+    try {
+        $writer = [IO.StreamWriter]::new($zip.CreateEntry('environmentvariabledefinitions/wrong_folder/environmentvariabledefinition.xml').Open())
+        try { $writer.Write('<environmentvariabledefinition schemaname="different_schema" />') } finally { $writer.Dispose() }
+    } finally { $zip.Dispose() }
+    Assert-Fails 'separate definition identity mismatch fails closed' 'does not match its definition folder' {
+        & "$root\Test-DeploymentSettings.ps1" -Configuration ($privateJson | ConvertFrom-Json) -Solution $invalidDefinition @settingsArgs
+    }
     foreach ($case in @('absent', 'malformed', 'wrong-solution', 'wrong-target', 'missing-variable', 'extra-variable', 'missing-connection',
         'unknown-property', 'non-string-value', 'placeholder', 'missing-array', 'non-array', 'duplicate-variable',
         'duplicate-connection', 'unknown-entry-property', 'empty-value', 'array-root', 'null-root')) {
