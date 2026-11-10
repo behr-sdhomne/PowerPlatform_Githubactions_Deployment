@@ -140,21 +140,53 @@ jobs:
   qa:
     name: Deploy QA
     needs: export
-    uses: ./.github/workflows/DeployManagedSolution.yml
-    with:
-      solution-name: ${{ inputs.solution-name }}
-      target: QA
-      expected-url: https://org94225411.crm.dynamics.com
-      artifact-id: ${{ needs.export.outputs.artifact-id }}
-      managed-sha256: ${{ needs.export.outputs.managed-sha256 }}
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 75
+    environment:
+      name: QA
+      url: https://org94225411.crm.dynamics.com
+    env:
+      PP_ENVIRONMENT_URL: ${{ vars.PP_ENVIRONMENT_URL }}
+      PP_APP_ID: ${{ vars.PP_APP_ID }}
+      PP_TENANT_ID: ${{ vars.PP_TENANT_ID }}
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+      EXPECTED_URL: https://org94225411.crm.dynamics.com
+      TARGET: QA
+      EXPECTED_SHA256: ${{ needs.export.outputs.managed-sha256 }}
+      SOLUTION_NAME: ${{ inputs.solution-name }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/deploy-managed-solution
+        with:
+          artifact-id: ${{ needs.export.outputs.artifact-id }}
+          deployment-settings-json: ${{ secrets[format('PP_DEPLOYMENT_SETTINGS_{0}', inputs.solution-name)] }}
 
   prod:
     name: Approve and deploy Prod
     needs: [export, qa]
-    uses: ./.github/workflows/DeployManagedSolution.yml
-    with:
-      solution-name: ${{ inputs.solution-name }}
-      target: Prod
-      expected-url: https://org4bd02029.crm.dynamics.com
-      artifact-id: ${{ needs.export.outputs.artifact-id }}
-      managed-sha256: ${{ needs.export.outputs.managed-sha256 }}
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 75
+    environment:
+      name: Prod
+      url: https://org4bd02029.crm.dynamics.com
+    env:
+      PP_ENVIRONMENT_URL: ${{ vars.PP_ENVIRONMENT_URL }}
+      PP_APP_ID: ${{ vars.PP_APP_ID }}
+      PP_TENANT_ID: ${{ vars.PP_TENANT_ID }}
+      PP_CLIENT_SECRET: ${{ secrets.PP_CLIENT_SECRET }}
+      EXPECTED_URL: https://org4bd02029.crm.dynamics.com
+      TARGET: Prod
+      EXPECTED_SHA256: ${{ needs.export.outputs.managed-sha256 }}
+      SOLUTION_NAME: ${{ inputs.solution-name }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/deploy-managed-solution
+        with:
+          artifact-id: ${{ needs.export.outputs.artifact-id }}
+          deployment-settings-json: ${{ secrets[format('PP_DEPLOYMENT_SETTINGS_{0}', inputs.solution-name)] }}

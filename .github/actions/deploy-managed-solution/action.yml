@@ -1,0 +1,77 @@
+name: Deploy managed solution
+description: Validate and import the checked managed artifact using the calling job environment.
+inputs:
+  artifact-id:
+    description: Immutable release artifact ID
+    required: true
+  deployment-settings-json:
+    description: Selected solution settings from the calling target environment secret
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Validate target configuration
+      shell: pwsh
+      run: |
+        .\.github\scripts\Test-SolutionName.ps1 -SolutionName $env:SOLUTION_NAME
+        if ($env:TARGET -notin @('QA', 'Prod')) { throw 'Unsupported deployment target.' }
+        .\.github\scripts\Test-Configuration.ps1 -ExpectedUrl $env:EXPECTED_URL
+    - name: Recheck production approval protection
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: .\.github\scripts\Test-ProductionGate.ps1
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      with:
+        artifact-ids: ${{ inputs.artifact-id }}
+        path: release
+        merge-multiple: true
+    - name: Verify identical release
+      shell: pwsh
+      run: |
+        .\.github\scripts\Test-ReleaseArtifact.ps1 -ReleaseDirectory release `
+          -ExpectedSolutionName $env:SOLUTION_NAME -ExpectedSha256 $env:EXPECTED_SHA256 `
+          -ExpectedSourceCommit $env:GITHUB_SHA
+    - name: Validate and materialize private target settings
+      shell: pwsh
+      env:
+        PP_DEPLOYMENT_SETTINGS_JSON: ${{ inputs.deployment-settings-json }}
+      run: |
+        .\.github\scripts\New-PrivateDeploymentSettings.ps1 `
+          -Solution release\managed.zip -ExpectedSolutionName $env:SOLUTION_NAME `
+          -ExpectedTarget $env:TARGET `
+          -OutputPath (Join-Path $env:RUNNER_TEMP 'pp-deployment-settings.json')
+    - name: Install Power Platform CLI
+      uses: microsoft/powerplatform-actions/actions-install@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
+    - name: Authenticate to target
+      uses: microsoft/powerplatform-actions/who-am-i@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
+      with:
+        environment-url: ${{ env.PP_ENVIRONMENT_URL }}
+        app-id: ${{ env.PP_APP_ID }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+    - name: Import managed update
+      uses: microsoft/powerplatform-actions/import-solution@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
+      with:
+        environment-url: ${{ env.PP_ENVIRONMENT_URL }}
+        app-id: ${{ env.PP_APP_ID }}
+        tenant-id: ${{ env.PP_TENANT_ID }}
+        client-secret: ${{ env.PP_CLIENT_SECRET }}
+        solution-file: release/managed.zip
+        use-deployment-settings-file: true
+        deployment-settings-file: ${{ runner.temp }}\pp-deployment-settings.json
+        run-asynchronously: true
+        max-async-wait-time: 60
+        force-overwrite: false
+        stage-and-upgrade: false
+        publish-changes: true
+    - name: Record successful import
+      shell: pwsh
+      run: |
+        "## $env:SOLUTION_NAME - $env:TARGET import succeeded`n`nManaged SHA256: $env:EXPECTED_SHA256`n`nVerify app behavior, connections, permissions and flow activation before approving production." >> $env:GITHUB_STEP_SUMMARY
+    - name: Remove private target settings
+      if: always()
+      shell: pwsh
+      run: |
+        $path = Join-Path $env:RUNNER_TEMP 'pp-deployment-settings.json'
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }

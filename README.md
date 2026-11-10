@@ -124,6 +124,24 @@ federation support and does not request `id-token: write`.
 
 ## Private target-specific deployment settings
 
+QA and Prod are direct jobs in `PowerPlatformDeploymentActions.yml`, each bound
+to its own GitHub environment. They share deployment steps through
+`.github\actions\deploy-managed-solution\action.yml`, a local composite action.
+The old reusable `DeployManagedSolution.yml` workflow has been removed. This
+avoids reusable-workflow secret forwarding entirely: no `secrets: inherit`,
+credential copies into Dev, or broader repository secrets are required.
+The calling job supplies only its authentication secret and the selected
+solution's private settings to the deployment steps.
+
+GitHub documents that reusable-workflow callers must explicitly pass secrets,
+even when the called job declares an environment; otherwise they can resolve
+empty. The prior caller omitted that forwarding, causing the QA credential guard
+to fail despite an environment secret existing. See
+[GitHub reusable workflow secret semantics](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow).
+After publishing this correction, start a new manual run on updated `main`,
+not a rerun of an older workflow revision. Local validation does not execute
+GitHub's environment-secret resolution; the next authorized run must confirm it.
+
 All target connection IDs, connector IDs, schema/logical names and values belong
 in **GitHub environment secrets**, not files tracked in this public repository.
 Use one JSON secret per solution, with the **same secret name** in QA and Prod

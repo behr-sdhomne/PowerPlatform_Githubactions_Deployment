@@ -306,13 +306,24 @@ try {
             -ExpectedTarget QA -OutputPath $privatePath | Out-Null
     }
     Assert-Passes 'workflow isolates private settings to deployment job and cleans temporary file' {
-        $exportYaml = Get-Content (Join-Path $root '..\workflows\PowerPlatformDeploymentActions.yml') -Raw
-        $deployYaml = Get-Content (Join-Path $root '..\workflows\DeployManagedSolution.yml') -Raw
+        $mainYaml = Get-Content (Join-Path $root '..\workflows\PowerPlatformDeploymentActions.yml') -Raw
+        $exportYaml = ($mainYaml -split '(?m)^  qa:')[0]
+        $deployYaml = Get-Content (Join-Path $root '..\actions\deploy-managed-solution\action.yml') -Raw
         if ($exportYaml -match 'PP_DEPLOYMENT_SETTINGS|Test-DeploymentSettings|deployment-settings\\' -or
-            $deployYaml -notmatch "secrets\[format\('PP_DEPLOYMENT_SETTINGS_\{0\}', inputs.solution-name\)\]" -or
+            $deployYaml -notmatch 'inputs.deployment-settings-json' -or
             $deployYaml -notmatch "if: always\(\)[\s\S]*Remove-Item -LiteralPath" -or
             $deployYaml -match 'upload-artifact|secrets: inherit') {
             throw 'Private configuration scope or cleanup wiring changed.'
+        }
+        foreach ($target in @('QA', 'Prod')) {
+            $jobId = $target.ToLowerInvariant()
+            $job = [regex]::Match($mainYaml, "(?ms)^  ${jobId}:.*?(?=^  [a-z]+:|\z)").Value
+            if ($job -notmatch "environment:\s+name: $target" -or $job -notmatch 'runs-on: windows-latest' -or
+                $job -notmatch 'PP_CLIENT_SECRET: \$\{\{ secrets.PP_CLIENT_SECRET \}\}' -or
+                $job -notmatch "secrets\[format\('PP_DEPLOYMENT_SETTINGS_\{0\}', inputs.solution-name\)\]" -or
+                $job -notmatch 'uses: ./.github/actions/deploy-managed-solution' -or $job -match 'secrets: inherit') {
+                throw 'Direct deployment job must bind its environment and pass only selected configuration to shared steps.'
+            }
         }
     }
 
@@ -374,9 +385,9 @@ try {
     $testGatePolicy.branch_policies[0].name = 'main'
     $testGatePolicy.branch_policies[0].type = 'tag'
     Assert-Fails 'main tag is not main branch' 'exactly the main branch' { & "$root\Test-ProductionGate.ps1" }
-    foreach ($workflow in @('PowerPlatformDeploymentActions.yml', 'DeployManagedSolution.yml')) {
+    foreach ($workflow in @('..\workflows\PowerPlatformDeploymentActions.yml', '..\actions\deploy-managed-solution\action.yml')) {
         Assert-Passes "official PAC installer precedes consuming actions in $workflow" {
-            $yaml = Get-Content (Join-Path $root "..\workflows\$workflow") -Raw
+            $yaml = Get-Content (Join-Path $root $workflow) -Raw
             $actions = [regex]::Matches($yaml, 'uses: microsoft/powerplatform-actions/([a-z-]+)@([a-f0-9]{40})')
             if ($actions.Count -lt 2 -or $actions[0].Groups[1].Value -ne 'actions-install' -or
                 @($actions | Where-Object { $_.Groups[2].Value -ne '6e91314a9c6e694ea5c894fe8c40e09d73aa892b' }).Count) {
