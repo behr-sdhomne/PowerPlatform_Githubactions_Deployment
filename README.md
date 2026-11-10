@@ -9,10 +9,18 @@ Non-main dispatches skip deployment. One release runs at a time; a new release
 does not cancel an in-progress deployment. GitHub concurrency retains only one
 pending run, so it is not a FIFO release queue.
 
+This is a **GitHub Actions** deployment route, not a native Power Platform
+Pipeline. It does not require enabling **Managed Environments**. A managed
+solution ZIP is a deployment package type, not a Managed Environment setting.
+Normal Dataverse access, component licensing and connection authorization still
+apply. The workflow is reusable, but each solution's connection references and
+environment-variable values remain inherently target-specific; setup is one
+private JSON secret per solution in each target environment.
+
 Use the **unique name**, not the display name: for example `GithubSolutions_POC`
 or `BCURequestsWorkflow`. The same workflow supports any eligible unmanaged
 solution in the configured Dev environment, provided its dependencies, deployment
-permissions and per-solution target configurations are ready. It is not a
+permissions and private per-solution target configurations are ready. It is not a
 cross-tenant or arbitrary-environment deployment tool. Managed-only, system or
 non-exportable solutions are not made eligible by entering their name; Dataverse
 export/authentication errors fail the run.
@@ -107,65 +115,126 @@ Missing, empty, zero-GUID, and recognizable placeholder configuration fails befo
 authentication. Rotate secrets before expiry. This workflow does not claim OIDC
 federation support and does not request `id-token: write`.
 
-## Target-specific deployment settings
+## Private target-specific deployment settings
 
-Every selected solution needs **both**
-`deployment-settings\<unique-name>\QA.json` and
-`deployment-settings\<unique-name>\Prod.json`, even if it has no connection
-references or environment variables. There is no shared/default configuration
-fallback. Both files are checked before authentication/export, then checked against
-the managed package before QA is changed, and again before each target import.
-Names and case in the input, package manifest and configuration must match exactly.
+All target connection IDs, connector IDs, schema/logical names and values belong
+in **GitHub environment secrets**, not files tracked in this public repository.
+Use one JSON secret per solution, with the **same secret name** in QA and Prod
+and different target-specific contents. No GitHub variable is required for these
+private values; ordinary variables are not masked like secrets.
 
-**BCU migration:** the original root-level `QA.json` and `Prod.json` templates
-have moved unchanged in their mapping arrays to
-`deployment-settings\BCURequestsWorkflow\`. Each now includes `SolutionName` and
-`TargetEnvironment` identity fields. Run the workflow with
-`solution-name: BCURequestsWorkflow` to select this configuration. If you have
-filled copies of the old files elsewhere, move those values into the corresponding
-solution folder and add the two identity fields rather than discarding them.
-There is deliberately no legacy-path fallback.
+| Environment | Secret name | Contents |
+| --- | --- | --- |
+| QA | `PP_DEPLOYMENT_SETTINGS_GITHUBSOLUTIONS_POC` | POC JSON with `TargetEnvironment: QA` |
+| Prod | `PP_DEPLOYMENT_SETTINGS_GITHUBSOLUTIONS_POC` | POC JSON with `TargetEnvironment: Prod` |
+| QA | `PP_DEPLOYMENT_SETTINGS_BCUREQUESTSWORKFLOW` | BCU JSON with `TargetEnvironment: QA` |
+| Prod | `PP_DEPLOYMENT_SETTINGS_BCUREQUESTSWORKFLOW` | BCU JSON with `TargetEnvironment: Prod` |
 
-For a new solution, generate its actual inventory from a managed export:
+For any other solution, use `PP_DEPLOYMENT_SETTINGS_<UNIQUE_NAME_IN_UPPERCASE>`.
+GitHub secret names are case-insensitive; JSON `SolutionName`, package identity
+and dispatch input must still match **exactly**, including case. Do not configure
+solutions distinguished only by casing as separate secret entries. Each secret
+holds only one solution, avoiding a shared multi-solution registry. Secret names
+are at most 88 characters with the accepted solution-name limit. The complete
+JSON must fit GitHub's 48 KB per-secret limit; do not silently truncate or split
+it. Very large configurations require a separately reviewed secure-storage design.
 
-```powershell
-pac solution create-settings --solution-zip .\GithubSolutions_POC_managed.zip --settings-file .\settings.generated.json
+In **Settings > Environments > QA (then Prod) > Environment secrets**, add the
+appropriate name and paste the target-specific JSON. Store these only at
+environment scope, not repository/organization scope or in Dev. GitHub resolves
+secrets by name and can fall back to broader scopes if configured there; the
+workflow cannot distinguish that origin, so administrators must enforce this
+scope rule. Never paste actual values into chat or public files. The existing
+`PP_CLIENT_SECRET` authentication secret is separate and unchanged.
+
+The JSON must be a single object with exactly these four properties. This
+**illustrative placeholder-only example** describes the POC shape, not its real
+schema names, connector or connections. All angle-bracket placeholders must be
+replaced privately; placeholders fail validation.
+
+```json
+{
+  "SolutionName": "GithubSolutions_POC",
+  "TargetEnvironment": "QA",
+  "EnvironmentVariables": [
+    { "SchemaName": "<ACTUAL_SITE_SCHEMA_NAME>", "Value": "<QA_SHAREPOINT_SITE_URL>" },
+    { "SchemaName": "<ACTUAL_LIST_1_SCHEMA_NAME>", "Value": "<QA_LIST_1_VALUE>" },
+    { "SchemaName": "<ACTUAL_LIST_2_SCHEMA_NAME>", "Value": "<QA_LIST_2_VALUE>" },
+    { "SchemaName": "<ACTUAL_LIST_3_SCHEMA_NAME>", "Value": "<QA_LIST_3_VALUE>" }
+  ],
+  "ConnectionReferences": [
+    {
+      "LogicalName": "<ACTUAL_CONNECTION_REFERENCE_LOGICAL_NAME>",
+      "ConnectionId": "<QA_AUTHORIZED_CONNECTION_ID>",
+      "ConnectorId": "<ACTUAL_CONNECTOR_ID>"
+    }
+  ]
+}
 ```
 
-Create a folder named `GithubSolutions_POC` under `deployment-settings`, then
-create `QA.json` and `Prod.json` from that inventory. Add
-`"SolutionName": "GithubSolutions_POC"` and `"TargetEnvironment": "QA"` or
-`"Prod"` respectively alongside the two arrays generated by PAC. Each connection
-entry requires `LogicalName`, `ConnectionId`, and `ConnectorId`; each variable
-entry requires `SchemaName` and `Value`. Obtain actual IDs from the target
-environment. Create/authorize connections there first. Review any existing
-environment variable current values in the source solution to avoid shipping
-Dev-specific configuration.
+For Prod use `"TargetEnvironment": "Prod"` and the actual production site/list
+values and connection ID. Every entry field is a non-empty JSON **string**;
+list titles versus GUIDs depend on what the solution expects, not the pipeline.
+Both arrays are required, even when empty. Use the actual inventory, not the
+example's count, for other solutions.
 
-For `GithubSolutions_POC`, the reported inventory is **one Excel Online (Business)
-connection reference and four environment variables**. Their actual logical/schema
-names, connector ID, authorized QA/Prod connection IDs, and target values still
-need to be obtained. No POC configuration is fabricated here: the workflow will
-refuse to release it until both real configuration files exist and pass validation.
-Do not copy the empty BCU mappings as if they were valid POC settings.
+The user confirmed the four POC variables represent **one SharePoint site and
+three SharePoint lists**. An earlier inventory identified an **Excel Online
+(Business)** reference. Do not infer the reference's connector from the variable
+values: obtain its actual logical name and connector ID, and verify whether an
+additional SharePoint reference exists in the exported solution. Create and
+authorize the actual required connections in QA and Prod. Four SharePoint-related
+variables alone do not prove which connector the solution uses.
 
-The pre-import guard reads the solution's `customizations.xml` and requires an
-explicit non-empty target value for every packaged environment variable and an
-explicit mapping for every connection reference. It rejects unresolved
-placeholders, duplicate names, and missing mappings rather than silently accepting
-Dev defaults. It also rejects mappings not present in the selected solution and
-configurations bound to a different solution or target. The runtime import file
-contains only PAC's `EnvironmentVariables` and `ConnectionReferences` arrays;
-the identity fields are validation metadata and are not passed to PAC.
-Intentionally blank variables need a reviewed validator change.
-Do not commit passwords, tokens or other secret configuration to these files:
-use platform-supported secret stores (for example Key Vault-backed variables).
-This repository is public; review connection metadata and exported solution
-contents for sensitive information before uploading or committing them.
+To obtain the real inventory, generate settings from a managed export on an
+approved local machine, outside this public checkout:
+
+```powershell
+pac solution create-settings --solution-zip .\GithubSolutions_POC_managed.zip --settings-file .\QA.private.json
+```
+
+Add the two identity properties, complete the PAC arrays privately, and prepare
+the Prod copy with its own values. Files named `*.private.json` and the old
+`deployment-settings` directory are git-ignored as an extra guard, not a security
+boundary. Prefer keeping private files outside the checkout; never `git add -f`
+them. If real configuration was previously committed, deleting the latest file
+does not remove it from history: assess exposure and rotate any credentials.
+
+**BCU migration:** public `deployment-settings\BCURequestsWorkflow\QA.json` and
+`Prod.json` templates have been removed. Put equivalent JSON (including
+`SolutionName: BCURequestsWorkflow` and the correct target) into the BCU
+environment secrets listed above. Their previously empty arrays are valid only
+if the actual BCU package has no references or variables. There is no tracked-file,
+legacy-path, variable or blank-settings fallback.
+
+Dev never reads QA or Prod private configuration. Each deployment job receives
+only the selected solution's secret from its **own** environment; Prod's secret
+is available only after environment approval. Consequently, private settings can
+no longer be fully preflighted in Dev. QA validates its configuration before its
+import; Prod validates its configuration after approval but before its import.
+A missing/invalid Prod secret may stop a release after QA has succeeded.
+
+The guard verifies package identity, target identity, array shapes, duplicates,
+placeholders, extra mappings and completeness against `customizations.xml`.
+Wrong-solution or wrong-target configuration is rejected. Blank values require a
+reviewed validator change. No JSON content is interpolated into shell source.
+The loader registers masks for the complete JSON and individual strings and
+reports only sanitized errors; do not enable runner/step debug logging or print
+the configuration yourself. It materializes only PAC's two arrays in
+`RUNNER_TEMP\pp-deployment-settings.json`, never a release artifact or job output.
+The private input is cleared from the loader process environment and an
+`always()` cleanup removes the temporary file on success or failure.
+Hosted runners are ephemeral; hard termination can skip cleanup, so this workflow
+uses hosted runners rather than promising secure file deletion on shared hosts.
+
+This protects **target configuration**, not sensitive Dev values already embedded
+in exported ZIPs or Checker reports. Remove inappropriate source current values
+and review exports before release. GitHub log masking is defense in depth, not
+a substitute for trusting/reviewing actions, platform logs and authorized users.
 
 ## Release runbook
 
-1. Complete environments, reviewer protection, credentials, connection mappings,
+1. Complete environments, reviewer protection, credentials, both private target secrets,
    dependency installation, licensing and target access. Run local validation
    below before merging the workflow into `main`.
 2. Save/publish and increment the Dev solution version. Confirm no release is
@@ -212,12 +281,23 @@ solution history and completion status before starting another release.
 
 Run `actionlint` from the repository root and run
 `pwsh -NoProfile -File .\.github\scripts\Test-Pipeline.ps1` for the guard tests.
-Validate settings against an actual exported package using:
+All guard tests use synthetic values and temporary packages, not real secrets.
+For an authorized local validation of a private file outside the checkout, use:
 
 ```powershell
-.\.github\scripts\Test-DeploymentSettings.ps1 -Solution .\GithubSolutions_POC_managed.zip -Settings .\deployment-settings\GithubSolutions_POC\QA.json -ExpectedSolutionName GithubSolutions_POC -ExpectedTarget QA
-.\.github\scripts\Test-DeploymentSettings.ps1 -Solution .\GithubSolutions_POC_managed.zip -Settings .\deployment-settings\GithubSolutions_POC\Prod.json -ExpectedSolutionName GithubSolutions_POC -ExpectedTarget Prod
+$env:PP_DEPLOYMENT_SETTINGS_JSON = Get-Content 'C:\ApprovedPrivateLocation\QA.private.json' -Raw
+$path = Join-Path $env:TEMP 'pp-settings.private.json'
+try {
+    .\.github\scripts\New-PrivateDeploymentSettings.ps1 -Solution 'C:\ApprovedPrivateLocation\GithubSolutions_POC_managed.zip' -ExpectedSolutionName GithubSolutions_POC -ExpectedTarget QA -OutputPath $path | Out-Null
+} finally {
+    $env:PP_DEPLOYMENT_SETTINGS_JSON = $null
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+}
 ```
+
+Do not run local validation in a recorded/shared shell with real configuration.
+The loader's mask commands are consumed by GitHub Actions; they are not a local
+terminal redaction mechanism.
 
 Complete any pending credentials and the actual per-solution connection inventory
 before a release. No fake credential secrets are supplied, and no deployment is

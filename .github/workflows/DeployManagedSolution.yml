@@ -61,16 +61,19 @@ jobs:
           artifact-ids: ${{ inputs.artifact-id }}
           path: release
           merge-multiple: true
-      - name: Verify identical release and complete target settings
+      - name: Verify identical release
         run: |
           .\.github\scripts\Test-ReleaseArtifact.ps1 -ReleaseDirectory release `
             -ExpectedSolutionName $env:SOLUTION_NAME -ExpectedSha256 $env:EXPECTED_SHA256 `
             -ExpectedSourceCommit $env:GITHUB_SHA
-          .\.github\scripts\Test-DeploymentSettings.ps1 `
-            -Solution release\managed.zip `
-            -Settings "deployment-settings\$env:SOLUTION_NAME\$env:TARGET.json" `
-            -ExpectedSolutionName $env:SOLUTION_NAME -ExpectedTarget $env:TARGET `
-            -OutputPath release\deployment-settings.json
+      - name: Validate and materialize private target settings
+        env:
+          PP_DEPLOYMENT_SETTINGS_JSON: ${{ secrets[format('PP_DEPLOYMENT_SETTINGS_{0}', inputs.solution-name)] }}
+        run: |
+          .\.github\scripts\New-PrivateDeploymentSettings.ps1 `
+            -Solution release\managed.zip -ExpectedSolutionName $env:SOLUTION_NAME `
+            -ExpectedTarget $env:TARGET `
+            -OutputPath (Join-Path $env:RUNNER_TEMP 'pp-deployment-settings.json')
       - name: Authenticate to target
         uses: microsoft/powerplatform-actions/who-am-i@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
         with:
@@ -87,7 +90,7 @@ jobs:
           client-secret: ${{ env.PP_CLIENT_SECRET }}
           solution-file: release/managed.zip
           use-deployment-settings-file: true
-          deployment-settings-file: release/deployment-settings.json
+          deployment-settings-file: ${{ runner.temp }}\pp-deployment-settings.json
           run-asynchronously: true
           max-async-wait-time: 60
           force-overwrite: false
@@ -96,3 +99,8 @@ jobs:
       - name: Record successful import
         run: |
           "## $env:SOLUTION_NAME - $env:TARGET import succeeded`n`nManaged SHA256: $env:EXPECTED_SHA256`n`nVerify app behavior, connections, permissions and flow activation before approving production." >> $env:GITHUB_STEP_SUMMARY
+      - name: Remove private target settings
+        if: always()
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP 'pp-deployment-settings.json'
+          if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }

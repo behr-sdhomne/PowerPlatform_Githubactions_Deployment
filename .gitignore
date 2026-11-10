@@ -1,0 +1,3 @@
+# Deployment settings belong in environment secrets, not this public repository.
+deployment-settings/
+*.private.json

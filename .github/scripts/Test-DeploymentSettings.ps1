@@ -1,5 +1,6 @@
 param(
-    [Parameter(Mandatory)][string]$Settings,
+    [Parameter(Mandatory, ParameterSetName = 'File')][string]$Settings,
+    [Parameter(Mandatory, ParameterSetName = 'Object')][pscustomobject]$Configuration,
     [Parameter(Mandatory)][string]$ExpectedSolutionName,
     [Parameter(Mandatory)][ValidateSet('QA', 'Prod')][string]$ExpectedTarget,
     [string]$Solution,
@@ -8,11 +9,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 & "$PSScriptRoot\Test-SolutionName.ps1" -SolutionName $ExpectedSolutionName
-$raw = Get-Content -LiteralPath $Settings -Raw
+$raw = if ($PSCmdlet.ParameterSetName -eq 'File') {
+    Get-Content -LiteralPath $Settings -Raw
+} else {
+    ConvertTo-Json -InputObject $Configuration -Depth 20
+}
 if ($raw -match '(?i)placeholder|replace[_ -]?me|<|>') {
     throw "Unresolved placeholder in $Settings."
 }
-$config = $raw | ConvertFrom-Json
+$config = if ($PSCmdlet.ParameterSetName -eq 'File') { $raw | ConvertFrom-Json } else { $Configuration }
 if ($config.SolutionName -cne $ExpectedSolutionName -or $config.TargetEnvironment -cne $ExpectedTarget) {
     throw 'Deployment settings solution name or target environment does not match the selected release.'
 }

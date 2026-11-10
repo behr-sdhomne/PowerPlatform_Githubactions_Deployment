@@ -31,7 +31,7 @@ function New-TestPackage([string]$Path, [string]$Customizations, [string]$Manage
 }
 $temp = Join-Path ([IO.Path]::GetTempPath()) "power-platform-tests-$([guid]::NewGuid())"
 New-Item -ItemType Directory -Path $temp | Out-Null
-$names = @('PP_ENVIRONMENT_URL', 'PP_APP_ID', 'PP_TENANT_ID', 'PP_CLIENT_SECRET', 'GH_TOKEN', 'GITHUB_API_URL', 'GITHUB_REPOSITORY')
+$names = @('PP_ENVIRONMENT_URL', 'PP_APP_ID', 'PP_TENANT_ID', 'PP_CLIENT_SECRET', 'GH_TOKEN', 'GITHUB_API_URL', 'GITHUB_REPOSITORY', 'PP_DEPLOYMENT_SETTINGS_JSON')
 $original = @{}
 foreach ($name in $names) { $original[$name] = [Environment]::GetEnvironmentVariable($name) }
 try {
@@ -178,8 +178,10 @@ try {
         & "$root\Test-SolutionPackages.ps1" -Managed $empty -ExpectedSolutionName BCURequestsWorkflow
     }
     Assert-Fails 'settings cannot validate wrong solution package' 'package type is incorrect' {
+        @{ SolutionName = 'BCURequestsWorkflow'; TargetEnvironment = 'QA'; EnvironmentVariables = @(); ConnectionReferences = @() } |
+            ConvertTo-Json | Set-Content $settings
         & "$root\Test-DeploymentSettings.ps1" -Solution $empty `
-            -Settings (Join-Path $root '..\..\deployment-settings\BCURequestsWorkflow\QA.json') `
+            -Settings $settings `
             -ExpectedSolutionName BCURequestsWorkflow -ExpectedTarget QA
     }
     $bcuManaged = Join-Path $temp 'bcu-managed.zip'
@@ -190,9 +192,11 @@ try {
         & "$root\Test-SolutionPackages.ps1" -Managed $bcuManaged -Unmanaged $bcuUnmanaged -ExpectedSolutionName BCURequestsWorkflow
     }
     foreach ($target in @('QA', 'Prod')) {
-        Assert-Passes "migrated BCU settings $target" {
+        Assert-Passes "BCU settings identity $target" {
+            @{ SolutionName = 'BCURequestsWorkflow'; TargetEnvironment = $target; EnvironmentVariables = @(); ConnectionReferences = @() } |
+                ConvertTo-Json | Set-Content $settings
             & "$root\Test-DeploymentSettings.ps1" -Solution $bcuManaged `
-                -Settings (Join-Path $root "..\..\deployment-settings\BCURequestsWorkflow\$target.json") `
+                -Settings $settings `
                 -ExpectedSolutionName BCURequestsWorkflow -ExpectedTarget $target
         }
     }
@@ -209,6 +213,107 @@ try {
     $config | ConvertTo-Json -Depth 5 | Set-Content $settings
     Assert-Fails 'POC-shaped inventory missing fourth variable' 'Missing explicit target environment variable' {
         & "$root\Test-DeploymentSettings.ps1" -Solution $poc -Settings $settings @settingsArgs
+    }
+
+    $privatePath = Join-Path $temp 'private-settings.json'
+    $privateArgs = @{
+        Solution = $poc
+        ExpectedSolutionName = 'GithubSolutions_POC'
+        ExpectedTarget = 'QA'
+        OutputPath = $privatePath
+    }
+    $config.EnvironmentVariables = @(1..4 | ForEach-Object { @{ SchemaName = "synthetic_poc_$_"; Value = "synthetic-target-value-$_" } })
+    $privateJson = $config | ConvertTo-Json -Depth 5
+    Assert-Passes 'private JSON renders only PAC arrays and masks each value' {
+        $env:PP_DEPLOYMENT_SETTINGS_JSON = $privateJson
+        $messages = @(& "$root\New-PrivateDeploymentSettings.ps1" @privateArgs)
+        $rendered = Get-Content $privatePath -Raw | ConvertFrom-Json
+        if ($rendered.EnvironmentVariables.Count -ne 4 -or $rendered.ConnectionReferences.Count -ne 1 -or
+            @($rendered.PSObject.Properties.Name).Count -ne 2) { throw 'Private output schema mismatch.' }
+        foreach ($value in @('synthetic-target-value-1', 'synthetic-target-value-4', 'behr_shared', 'synthetic-test-connection')) {
+            if ("::add-mask::$value" -notin $messages) { throw 'Private value was not masked.' }
+        }
+        if (@($messages | Where-Object { $_ -notlike '::add-mask::*' -and $_ -ne 'Private deployment settings validated and prepared for import.' }).Count) {
+            throw 'Unexpected private settings log output.'
+        }
+        if ($env:PP_DEPLOYMENT_SETTINGS_JSON) { throw 'Private JSON remained in the process environment.' }
+    }
+    foreach ($case in @('absent', 'malformed', 'wrong-solution', 'wrong-target', 'missing-variable', 'extra-variable', 'missing-connection',
+        'unknown-property', 'non-string-value', 'placeholder', 'missing-array', 'non-array', 'duplicate-variable',
+        'duplicate-connection', 'unknown-entry-property', 'empty-value', 'array-root', 'null-root')) {
+        Assert-Passes "private config rejects $case with sanitized error and removes stale file" {
+            $candidate = $privateJson | ConvertFrom-Json
+            switch ($case) {
+                'wrong-solution' { $candidate.SolutionName = 'AnotherSolution' }
+                'wrong-target' { $candidate.TargetEnvironment = 'Prod' }
+                'missing-variable' { $candidate.EnvironmentVariables = @($candidate.EnvironmentVariables | Select-Object -First 3) }
+                'extra-variable' { $candidate.EnvironmentVariables += [pscustomobject]@{ SchemaName = 'private-unrelated-variable'; Value = 'private-value' } }
+                'missing-connection' { $candidate.ConnectionReferences = @() }
+                'unknown-property' { $candidate | Add-Member -NotePropertyName 'InternalData' -NotePropertyValue 'private-value' }
+                'non-string-value' { $candidate.EnvironmentVariables[0].Value = @{ InternalData = 'private-value' } }
+                'placeholder' { $candidate.EnvironmentVariables[0].Value = 'REPLACE_ME' }
+                'missing-array' { $candidate.PSObject.Properties.Remove('ConnectionReferences') }
+                'non-array' { $candidate.EnvironmentVariables = 'not-an-array' }
+                'duplicate-variable' { $candidate.EnvironmentVariables += $candidate.EnvironmentVariables[0] }
+                'duplicate-connection' { $candidate.ConnectionReferences += $candidate.ConnectionReferences[0] }
+                'unknown-entry-property' { $candidate.EnvironmentVariables[0] | Add-Member -NotePropertyName 'InternalData' -NotePropertyValue 'private-value' }
+                'empty-value' { $candidate.EnvironmentVariables[0].Value = '' }
+            }
+            $env:PP_DEPLOYMENT_SETTINGS_JSON = $candidate | ConvertTo-Json -Depth 10
+            if ($case -eq 'absent') { $env:PP_DEPLOYMENT_SETTINGS_JSON = '' }
+            if ($case -eq 'malformed') { $env:PP_DEPLOYMENT_SETTINGS_JSON = '{"private-value": INVALID' }
+            if ($case -eq 'array-root') { $env:PP_DEPLOYMENT_SETTINGS_JSON = '[]' }
+            if ($case -eq 'null-root') { $env:PP_DEPLOYMENT_SETTINGS_JSON = 'null' }
+            'stale synthetic settings' | Set-Content $privatePath
+            $message = $null
+            try { & "$root\New-PrivateDeploymentSettings.ps1" @privateArgs | Out-Null } catch { $message = $_.Exception.Message }
+            if ($message -ne 'Private deployment settings are missing or invalid. Check the selected environment secret, solution/target identity, JSON schema and complete package inventory.') {
+                throw 'Private error was not the expected sanitized message.'
+            }
+            if (Test-Path -LiteralPath $privatePath) { throw 'Stale private output was not removed.' }
+            if ($env:PP_DEPLOYMENT_SETTINGS_JSON) { throw 'Private JSON remained after failure.' }
+        }
+    }
+    Assert-Passes 'private values are data, not executable PowerShell or log commands' {
+        $candidate = $privateJson | ConvertFrom-Json
+        $candidate.EnvironmentVariables[0].Value = '$(throw "must-not-execute")'
+        $candidate.EnvironmentVariables[1].Value = "synthetic`n::warning::not-a-command%"
+        $env:PP_DEPLOYMENT_SETTINGS_JSON = $candidate | ConvertTo-Json -Depth 10
+        $messages = @(& "$root\New-PrivateDeploymentSettings.ps1" @privateArgs)
+        $rendered = Get-Content $privatePath -Raw | ConvertFrom-Json
+        if ($rendered.EnvironmentVariables[0].Value -cne '$(throw "must-not-execute")' -or
+            '::add-mask::synthetic%0A::warning::not-a-command%25' -notin $messages -or
+            @($messages | Where-Object { $_ -match "[`r`n]" }).Count) {
+            throw 'Private values were executed, altered, or not escaped for log masking.'
+        }
+    }
+    Assert-Passes 'Prod private values are independent from QA' {
+        $candidate = $privateJson | ConvertFrom-Json
+        $candidate.TargetEnvironment = 'Prod'
+        $candidate.EnvironmentVariables[0].Value = 'synthetic-prod-site'
+        $env:PP_DEPLOYMENT_SETTINGS_JSON = $candidate | ConvertTo-Json -Depth 10
+        & "$root\New-PrivateDeploymentSettings.ps1" -Solution $poc -ExpectedSolutionName GithubSolutions_POC `
+            -ExpectedTarget Prod -OutputPath $privatePath | Out-Null
+        $rendered = Get-Content $privatePath -Raw | ConvertFrom-Json
+        if ($rendered.EnvironmentVariables[0].Value -ne 'synthetic-prod-site') { throw 'Wrong target value rendered.' }
+    }
+    Assert-Passes 'BCU private configuration remains supported' {
+        $env:PP_DEPLOYMENT_SETTINGS_JSON = @{
+            SolutionName = 'BCURequestsWorkflow'; TargetEnvironment = 'QA'
+            EnvironmentVariables = @(); ConnectionReferences = @()
+        } | ConvertTo-Json
+        & "$root\New-PrivateDeploymentSettings.ps1" -Solution $bcuManaged -ExpectedSolutionName BCURequestsWorkflow `
+            -ExpectedTarget QA -OutputPath $privatePath | Out-Null
+    }
+    Assert-Passes 'workflow isolates private settings to deployment job and cleans temporary file' {
+        $exportYaml = Get-Content (Join-Path $root '..\workflows\PowerPlatformDeploymentActions.yml') -Raw
+        $deployYaml = Get-Content (Join-Path $root '..\workflows\DeployManagedSolution.yml') -Raw
+        if ($exportYaml -match 'PP_DEPLOYMENT_SETTINGS|Test-DeploymentSettings|deployment-settings\\' -or
+            $deployYaml -notmatch "secrets\[format\('PP_DEPLOYMENT_SETTINGS_\{0\}', inputs.solution-name\)\]" -or
+            $deployYaml -notmatch "if: always\(\)[\s\S]*Remove-Item -LiteralPath" -or
+            $deployYaml -match 'upload-artifact|secrets: inherit') {
+            throw 'Private configuration scope or cleanup wiring changed.'
+        }
     }
 
     $release = Join-Path $temp 'release'
