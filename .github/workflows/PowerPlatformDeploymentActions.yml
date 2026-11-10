@@ -50,6 +50,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: .\.github\scripts\Test-ProductionGate.ps1
+      - name: Install Power Platform CLI
+        uses: microsoft/powerplatform-actions/actions-install@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
       - name: Authenticate to Dev
         uses: microsoft/powerplatform-actions/who-am-i@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
         with:
@@ -60,6 +62,7 @@ jobs:
       - name: Create output directory
         run: New-Item -ItemType Directory -Path release | Out-Null
       - name: Export unmanaged recovery and source package
+        id: unmanaged
         uses: microsoft/powerplatform-actions/export-solution@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
         with:
           environment-url: ${{ env.PP_ENVIRONMENT_URL }}
@@ -116,7 +119,7 @@ jobs:
           } | ConvertTo-Json | Set-Content release\manifest.json
           "## Release`n`nSolution: $env:SOLUTION_NAME $env:SOLUTION_VERSION`n`nManaged SHA256: $hash`n`nSource commit: $env:GITHUB_SHA" >> $env:GITHUB_STEP_SUMMARY
       - name: Preserve unmanaged package even if quality check fails
-        if: always() && steps.selection.outcome == 'success'
+        if: always() && steps.unmanaged.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dev-unmanaged-${{ inputs.solution-name }}-${{ github.run_id }}-${{ github.run_attempt }}

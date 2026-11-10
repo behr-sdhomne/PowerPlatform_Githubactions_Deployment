@@ -84,6 +84,13 @@ Allow GitHub Actions and the referenced Microsoft/GitHub actions in repository
 policy. The workflow token requests only `contents: read` and `actions: read`.
 All third-party actions are pinned to verified full commit SHAs. Review and
 update these pins periodically, including the Microsoft Checker behavior.
+Each export/deployment job installs PAC using the pinned official
+`microsoft/powerplatform-actions/actions-install` before authentication and other
+Power Platform actions. Jobs use independent GitHub-hosted runners: installing
+PAC on your workstation does not install it there, and an export-job install
+does not carry over to QA or Prod. If an earlier run failed with
+`PAC is not installed`, start a **new manual run on updated main**; rerunning the
+old run uses its original workflow revision. No retry is initiated automatically.
 
 ## Credentials and application user access
 

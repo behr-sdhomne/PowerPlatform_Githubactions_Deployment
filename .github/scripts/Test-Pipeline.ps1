@@ -374,6 +374,22 @@ try {
     $testGatePolicy.branch_policies[0].name = 'main'
     $testGatePolicy.branch_policies[0].type = 'tag'
     Assert-Fails 'main tag is not main branch' 'exactly the main branch' { & "$root\Test-ProductionGate.ps1" }
+    foreach ($workflow in @('PowerPlatformDeploymentActions.yml', 'DeployManagedSolution.yml')) {
+        Assert-Passes "official PAC installer precedes consuming actions in $workflow" {
+            $yaml = Get-Content (Join-Path $root "..\workflows\$workflow") -Raw
+            $actions = [regex]::Matches($yaml, 'uses: microsoft/powerplatform-actions/([a-z-]+)@([a-f0-9]{40})')
+            if ($actions.Count -lt 2 -or $actions[0].Groups[1].Value -ne 'actions-install' -or
+                @($actions | Where-Object { $_.Groups[2].Value -ne '6e91314a9c6e694ea5c894fe8c40e09d73aa892b' }).Count) {
+                throw 'Each runner must install PAC using the pinned official installer before authentication or other Power Platform actions.'
+            }
+        }
+    }
+    Assert-Passes 'unmanaged recovery upload requires successful export' {
+        $yaml = Get-Content (Join-Path $root '..\workflows\PowerPlatformDeploymentActions.yml') -Raw
+        if ($yaml -notmatch 'id: unmanaged' -or $yaml -notmatch "if: always\(\) && steps.unmanaged.outcome == 'success'") {
+            throw 'Recovery upload should not run when export was skipped or failed.'
+        }
+    }
     Write-Output "$count guard tests passed; all PowerShell scripts parsed."
 } finally {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $original[$name]) }

@@ -74,6 +74,8 @@ jobs:
             -Solution release\managed.zip -ExpectedSolutionName $env:SOLUTION_NAME `
             -ExpectedTarget $env:TARGET `
             -OutputPath (Join-Path $env:RUNNER_TEMP 'pp-deployment-settings.json')
+      - name: Install Power Platform CLI
+        uses: microsoft/powerplatform-actions/actions-install@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
       - name: Authenticate to target
         uses: microsoft/powerplatform-actions/who-am-i@6e91314a9c6e694ea5c894fe8c40e09d73aa892b # v1
         with:
